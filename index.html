@@ -57,7 +57,7 @@
 <body>
 
     <h1>🎰 로또 제외 번호 추출기</h1>
-    <p style="font-size:0.7rem; color:#aaa; margin-top:-16px; margin-bottom:14px;">v1.7 · 안드로이드 카메라 호환성 개선</p>
+    <p style="font-size:0.7rem; color:#aaa; margin-top:-16px; margin-bottom:14px;">v1.9 · 네이티브 디코더 비활성화(인식 안되던 문제 수정)</p>
     <p>구매한 로또 용지가 몇 장인지 먼저 선택해주세요.</p>
 
     <div id="select-container">
@@ -187,11 +187,22 @@
         function initScanner() {
             html5QrCode = new Html5Qrcode("reader");
             const config = {
-                fps: 10,
+                fps: 15,
                 qrbox: function(viewfinderWidth, viewfinderHeight) {
                     const minEdgeId = Math.min(viewfinderWidth, viewfinderHeight);
-                    const qrboxSize = Math.floor(minEdgeId * 0.7);
+                    // 인식 영역을 넓게 잡아서(85%) 종이를 정확히 맞추려고 앞뒤로
+                    // 움직이는 수고를 줄인다 - 영역 안에만 들어오면 더 쉽게 잡힘
+                    const qrboxSize = Math.floor(minEdgeId * 0.85);
                     return { width: qrboxSize, height: qrboxSize };
+                },
+                // 네이티브 BarcodeDetector(experimentalFeatures.useBarCodeDetectorIfSupported)는
+                // 일부 안드로이드 크롬 버전에서 카메라는 정상 작동하지만 내부적으로
+                // 빈 결과만 반환해 QR을 전혀 인식하지 못하는 버그가 있어 꺼둔다.
+                // 검증된 기존 JS 디코더(라이브러리 기본값)를 사용한다.
+                videoConstraints: {
+                    facingMode: "environment",
+                    // 초점 힌트 - 안드로이드 일부 브라우저에서만 효과 있고, iOS에서는 무시됨(무해)
+                    advanced: [{ focusMode: "continuous" }]
                 }
             };
 
