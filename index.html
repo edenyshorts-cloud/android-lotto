@@ -8,7 +8,7 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>로또 제외 번호 추출기</title>
-    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; text-align: center; background: #f8f9fa; padding: 20px; color: #333; }
         h1 { font-size: 1.5rem; margin-bottom: 5px; }
@@ -57,7 +57,7 @@
 <body>
 
     <h1>🎰 로또 제외 번호 추출기</h1>
-    <p style="font-size:0.7rem; color:#aaa; margin-top:-16px; margin-bottom:14px;">v1.9 · 네이티브 디코더 비활성화(인식 안되던 문제 수정)</p>
+    <p style="font-size:0.7rem; color:#aaa; margin-top:-16px; margin-bottom:14px;">v2.0 · 안드로이드 인식률 개선(줌/플래시/탭초점)</p>
     <p>구매한 로또 용지가 몇 장인지 먼저 선택해주세요.</p>
 
     <div id="select-container">
@@ -74,6 +74,7 @@
 
     <div id="scan-status"></div>
     <div id="reader"></div>
+    <div id="camera-controls" style="display:none; max-width:500px; margin:10px auto 0 auto;"></div>
 
     <div id="result-container">
         <h2 id="round-info"></h2>
@@ -199,9 +200,17 @@
                 // 일부 안드로이드 크롬 버전에서 카메라는 정상 작동하지만 내부적으로
                 // 빈 결과만 반환해 QR을 전혀 인식하지 못하는 버그가 있어 꺼둔다.
                 // 검증된 기존 JS 디코더(라이브러리 기본값)를 사용한다.
+
+                // 종이에 인쇄된 QR은 좌우반전되지 않으므로 반전 이미지 디코딩 시도를 끈다.
+                // (프레임당 디코딩 작업량이 절반으로 줄어 같은 fps에서 더 많이 시도 가능)
+                disableFlip: true,
+
                 videoConstraints: {
                     facingMode: "environment",
-                    // 초점 힌트 - 안드로이드 일부 브라우저에서만 효과 있고, iOS에서는 무시됨(무해)
+                    // 해상도를 높게 요청: 로또 용지의 QR은 작아서 해상도가 낮으면 모듈(칸)이 뭉개짐
+                    width: { ideal: 1920 },
+                    height: { ideal: 1080 },
+                    // 초점 힌트 - 지원하는 안드로이드 기기에서만 적용되고 미지원이면 무시됨(무해)
                     advanced: [{ focusMode: "continuous" }]
                 }
             };
@@ -240,6 +249,7 @@
                 .then(() => {
                     resolved = true;
                     clearTimeout(timeoutId);
+                    setupCameraControls(); // 카메라가 켜진 뒤 초점/줌/플래시 컨트롤 구성
                 })
                 .catch(err => {
                     resolved = true;
@@ -248,11 +258,90 @@
                 });
         }
 
+        // ===== 카메라 보조 기능: 연속 초점, 탭하여 초점, 줌 슬라이더, 플래시 =====
+        // 라이브러리 버전에 의존하지 않도록 실제 <video>의 MediaStreamTrack을 직접 사용한다.
+        // 기기가 지원하지 않는 기능(capabilities에 없는 항목)은 자동으로 숨겨지거나 건너뛴다.
+        function setupCameraControls() {
+            const controlsEl = document.getElementById("camera-controls");
+            controlsEl.innerHTML = '';
+            controlsEl.style.display = 'none';
+
+            try {
+                const video = document.querySelector('#reader video');
+                if (!video || !video.srcObject) return;
+                const track = video.srcObject.getVideoTracks()[0];
+                if (!track || typeof track.getCapabilities !== 'function') return;
+                const caps = track.getCapabilities();
+
+                // 1) 연속 자동초점: 시작 시 constraints 힌트가 무시된 기기를 위해 시작 후 다시 적용
+                if (caps.focusMode && caps.focusMode.includes('continuous')) {
+                    track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+                }
+
+                // 2) 화면을 탭하면 초점 재조정 (single-shot 지원 기기에서 초점을 다시 잡은 뒤 연속초점 복귀)
+                if (caps.focusMode && caps.focusMode.includes('single-shot')) {
+                    video.addEventListener('click', () => {
+                        track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] })
+                            .then(() => setTimeout(() => {
+                                if (caps.focusMode.includes('continuous')) {
+                                    track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {});
+                                }
+                            }, 1200))
+                            .catch(() => {});
+                    });
+                }
+
+                let html = '';
+
+                // 3) 줌 슬라이더: 작은 QR을 멀리서 크게 확대해서 읽을 수 있음 (초점 거리 문제 완화)
+                if (caps.zoom) {
+                    const min = caps.zoom.min, max = caps.zoom.max;
+                    const step = caps.zoom.step || 0.1;
+                    html += `<div style="margin:8px 0;">🔍 줌 <input type="range" id="zoom-slider" min="${min}" max="${max}" step="${step}" value="${min}" style="width:60%; vertical-align:middle;"></div>`;
+                }
+
+                // 4) 플래시(토치): 어두운 곳에서 인식률 크게 향상
+                if (caps.torch) {
+                    html += `<button id="torch-btn" type="button" style="padding:8px 16px; border:none; border-radius:8px; background:#f1c40f; font-weight:bold; cursor:pointer;">🔦 플래시 켜기</button>`;
+                }
+
+                if (!html) return;
+                controlsEl.innerHTML = html;
+                controlsEl.style.display = 'block';
+
+                const zoomEl = document.getElementById('zoom-slider');
+                if (zoomEl) {
+                    zoomEl.addEventListener('input', () => {
+                        track.applyConstraints({ advanced: [{ zoom: parseFloat(zoomEl.value) }] }).catch(() => {});
+                    });
+                }
+
+                const torchBtn = document.getElementById('torch-btn');
+                if (torchBtn) {
+                    let torchOn = false;
+                    torchBtn.addEventListener('click', () => {
+                        torchOn = !torchOn;
+                        track.applyConstraints({ advanced: [{ torch: torchOn }] })
+                            .then(() => { torchBtn.innerText = torchOn ? '🔦 플래시 끄기' : '🔦 플래시 켜기'; })
+                            .catch(() => { torchOn = !torchOn; });
+                    });
+                }
+            } catch (e) {
+                console.log('카메라 보조기능 설정 실패(무시 가능):', e);
+            }
+        }
+
+        function hideCameraControls() {
+            const el = document.getElementById("camera-controls");
+            if (el) { el.innerHTML = ''; el.style.display = 'none'; }
+        }
+
         function onScanSuccess(decodedText) {
             if (!decodedText.includes("dhlottery.co.kr")) return; // 로또 주소 아닐 시 무시
 
             try {
                 // 중복 실행 방지를 위해 스캐너 즉시 멈춤
+                hideCameraControls();
                 html5QrCode.stop().then(() => {
                     const urlParams = new URLSearchParams(decodedText.split('?')[1]);
                     const vData = urlParams.get('v');
